@@ -1,0 +1,8 @@
+
+ livekit-plugins-noise-cancellation~=0.2
+ python-dotenv
+ livekit-agents[google]~=1.2
+ pyttsx3
+
+
+
