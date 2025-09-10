@@ -3,40 +3,16 @@ from dotenv import load_dotenv
 import aiohttp
 import asyncio
 from livekit.agents import function_tool, RunContext
-from bs4 import BeautifulSoup
 import os
+import json
+
 
 load_dotenv(".env")
 SERPER_API_KEY = os.getenv("SERPER_API_KEY")
-
-async def fetch_article_text(session: aiohttp.ClientSession, url: str) -> str:
-    """
-    Fetch and extract main text content from a given URL.
-    Returns ❌ message if fetch fails.
-    """
-    try:
-        async with session.get(url, timeout=10) as response:
-            if response.status != 200:
-                return None   # return None to trigger fallback
-            html = await response.text()
-    except Exception:
-        return None   # also fallback
-
-    # Parse HTML
-    soup = BeautifulSoup(html, "html.parser")
-    paragraphs = [p.get_text(strip=True) for p in soup.find_all("p")]
-    article_text = " ".join(paragraphs)
-
-    if not article_text.strip():
-        return None  # fallback if empty
-
-    return article_text[:2000] + "..." if len(article_text) > 2000 else article_text
-
 @function_tool()
 async def research_topic(context: RunContext, question: str) -> str:
     """
-    Use Serper.dev to get top search results for a question,
-    try to fetch full articles, fallback to snippet if fetch fails.
+    Use Serper.dev to get top search results for a question and fetch full content from links.
     """
     url = "https://google.serper.dev/search"
     payload = {
@@ -50,38 +26,57 @@ async def research_topic(context: RunContext, question: str) -> str:
     }
 
     async with aiohttp.ClientSession() as session:
-        # Step 1: get search results
         async with session.post(url, json=payload, headers=headers) as response:
             if response.status != 200:
                 return f"❌ Failed to fetch search results. Status code: {response.status}"
             data = await response.json()
 
-        # Step 2: extract top 5 links + titles
-        snippets = []
-        for result in data.get("organic", [])[:2]:
-            title = result.get("title")
+        # Extract top 3-5 organic results
+        results = data.get("organic", [])[:2]  # limit to top 3 for performance
+
+        full_results = []
+        for result in results:
+            snippet = result.get("snippet", "")
             link = result.get("link")
-            snippet = result.get("snippet")
-            if not link or not title:
-                continue
+            page_content = ""
+            if link:
+                try:
+                    async with session.get(link, timeout=10) as page_response:
+                        if page_response.status == 200:
+                            page_text = await page_response.text()
+                            # Optional: simple cleanup to remove scripts/styles
+                            import re
+                            page_content = re.sub(r"<script.*?</script>", "", page_text, flags=re.DOTALL)
+                            page_content = re.sub(r"<style.*?</style>", "", page_content, flags=re.DOTALL)
+                            page_content = re.sub(r"<[^>]+>", "", page_content)  # remove remaining HTML tags
+                            page_content = page_content.strip()[:3000]  # limit to first 3k chars
+                        else:
+                            page_content = f"⚠️ Could not fetch full content. HTTP {page_response.status}"
+                except Exception as e:
+                    page_content = f"⚠️ Error fetching full page: {str(e)}"
 
-            # Step 3: fetch full article text (fallback to snippet if fail)
-            full_text = await fetch_article_text(session, link)
-            if full_text is None and snippet:
-                full_text = snippet
+            full_results.append(f"- Snippet: {snippet}\n- Full content from link: {page_content}")
 
-            snippets.append(f"{title}\n{full_text}\nRead more: {link}")
-
-    if not snippets:
+    if not full_results:
         return f"No results found for '{question}'."
 
-    return f"Search result articles for '{question}':\n\n" + "\n\n---\n\n".join(snippets)
+    final_output = (
+        f"<<RESEARCH_RESULT>>\n"
+        f"Question: {question}\n"
+        f"Results:\n" + "\n\n".join(full_results) +
+        f"\n<<END_RESEARCH_RESULT>>"
+    )
+
+    print(final_output)
+    return final_output
+
 
 # Quick standalone test
 if __name__ == "__main__":
     async def test():
         questions = [
-            "who won the ipl 2025"
+            "first match of asia cup 2025",
+
         ]
         for q in questions:
             answer = await research_topic(None, q)
